@@ -11,10 +11,20 @@ class PitchAnalyzer {
         this.ctx = this.canvas.getContext('2d');
         this.setupCanvas();
 
-        // Data storage (30 seconds at ~60fps)
-        this.maxDataPoints = 1800; // 30 seconds * 60 fps
+        // Data storage (30 seconds at 10 samples per second)
+        this.maxDataPoints = 300; // 30 seconds * 10 fps
         this.pitchHistory = [];
         this.timeHistory = [];
+
+        // Smoothing and filtering
+        this.smoothingBuffer = []; // For moving average
+        this.smoothingWindowSize = 5; // Average last 5 readings
+        this.volumeSmoothing = []; // For volume smoothing
+        this.volumeSmoothingSize = 3;
+        this.lastSampleTime = 0;
+        this.sampleInterval = 100; // Sample every 100ms (10 times per second)
+        this.minVolume = 0.02; // Minimum volume threshold
+        this.minConfidence = 0.92; // Minimum correlation confidence
 
         // UI elements
         this.startBtn = document.getElementById('startBtn');
@@ -115,22 +125,46 @@ class PitchAnalyzer {
         const volume = this.calculateVolume(buffer);
         this.updateVolumeDisplay(volume);
 
-        // Detect pitch using autocorrelation
-        const frequency = this.autoCorrelate(buffer, this.audioContext.sampleRate);
+        // Only sample at specified intervals
+        const now = Date.now();
+        const shouldSample = now - this.lastSampleTime >= this.sampleInterval;
 
-        if (frequency > 0) {
-            const note = this.frequencyToNote(frequency);
-            this.updatePitchDisplay(note, frequency);
+        if (shouldSample && volume >= this.minVolume) {
+            this.lastSampleTime = now;
 
-            // Store data
-            this.pitchHistory.push(note);
-            this.timeHistory.push(Date.now());
+            // Detect pitch using autocorrelation
+            const result = this.autoCorrelate(buffer, this.audioContext.sampleRate);
 
-            // Limit to 30 seconds
-            if (this.pitchHistory.length > this.maxDataPoints) {
-                this.pitchHistory.shift();
-                this.timeHistory.shift();
+            if (result.frequency > 0 && result.confidence >= this.minConfidence) {
+                // Add to smoothing buffer
+                this.smoothingBuffer.push(result.frequency);
+                if (this.smoothingBuffer.length > this.smoothingWindowSize) {
+                    this.smoothingBuffer.shift();
+                }
+
+                // Calculate smoothed frequency
+                const smoothedFreq = this.getSmoothedFrequency();
+                const note = this.frequencyToNote(smoothedFreq);
+
+                if (note) {
+                    this.updatePitchDisplay(note, smoothedFreq);
+
+                    // Store data for graph
+                    this.pitchHistory.push(note);
+                    this.timeHistory.push(now);
+
+                    // Limit to 30 seconds
+                    if (this.pitchHistory.length > this.maxDataPoints) {
+                        this.pitchHistory.shift();
+                        this.timeHistory.shift();
+                    }
+                }
             }
+        } else if (volume < this.minVolume) {
+            // Clear display when volume too low
+            this.currentPitch.textContent = '--';
+            this.currentFreq.textContent = '-- Hz';
+            this.smoothingBuffer = []; // Reset smoothing
         }
 
         // Draw canvas
@@ -149,8 +183,17 @@ class PitchAnalyzer {
     }
 
     updateVolumeDisplay(volume) {
+        // Add to smoothing buffer
+        this.volumeSmoothing.push(volume);
+        if (this.volumeSmoothing.length > this.volumeSmoothingSize) {
+            this.volumeSmoothing.shift();
+        }
+
+        // Calculate smoothed volume
+        const smoothedVolume = this.volumeSmoothing.reduce((a, b) => a + b, 0) / this.volumeSmoothing.length;
+
         // Convert to percentage (0-100)
-        const volumePercent = Math.min(100, volume * 500);
+        const volumePercent = Math.min(100, smoothedVolume * 500);
         this.volumeBar.style.width = volumePercent + '%';
         this.currentVolume.textContent = Math.round(volumePercent) + '%';
     }
@@ -171,7 +214,9 @@ class PitchAnalyzer {
         rms = Math.sqrt(rms / SIZE);
 
         // Not enough signal
-        if (rms < 0.01) return -1;
+        if (rms < this.minVolume) {
+            return { frequency: -1, confidence: 0 };
+        }
 
         // Find the best correlation
         let lastCorrelation = 1;
@@ -199,10 +244,18 @@ class PitchAnalyzer {
 
         if (best_correlation > 0.01 && best_offset > -1) {
             const frequency = sampleRate / best_offset;
-            return frequency;
+            return { frequency: frequency, confidence: best_correlation };
         }
 
-        return -1;
+        return { frequency: -1, confidence: 0 };
+    }
+
+    // Calculate smoothed frequency using moving average
+    getSmoothedFrequency() {
+        if (this.smoothingBuffer.length === 0) return 0;
+
+        const sum = this.smoothingBuffer.reduce((a, b) => a + b, 0);
+        return sum / this.smoothingBuffer.length;
     }
 
     frequencyToNote(frequency) {
@@ -243,25 +296,20 @@ class PitchAnalyzer {
         ctx.fillStyle = '#0f172a';
         ctx.fillRect(0, 0, width, height);
 
-        if (this.pitchHistory.length < 2) return;
-
-        // Calculate time range (30 seconds)
-        const now = Date.now();
-        const timeRange = 30000; // 30 seconds in ms
-
         // Draw grid lines
         this.drawGrid(ctx, width, height);
 
         // Draw note labels
         this.drawNoteLabels(ctx, height);
 
-        // Draw pitch line
-        ctx.beginPath();
-        ctx.strokeStyle = '#818cf8';
-        ctx.lineWidth = 2;
+        if (this.pitchHistory.length < 1) return;
 
-        let firstPoint = true;
+        // Calculate time range (30 seconds)
+        const now = Date.now();
+        const timeRange = 30000; // 30 seconds in ms
 
+        // Prepare points for drawing
+        const points = [];
         for (let i = 0; i < this.pitchHistory.length; i++) {
             const note = this.pitchHistory[i];
             const time = this.timeHistory[i];
@@ -278,34 +326,87 @@ class PitchAnalyzer {
             const maxMidi = 84; // C6
             const y = height - ((midiNote - minMidi) / (maxMidi - minMidi)) * height;
 
-            if (firstPoint) {
-                ctx.moveTo(x, y);
-                firstPoint = false;
-            } else {
-                ctx.lineTo(x, y);
-            }
+            points.push({ x, y, time });
         }
 
-        ctx.stroke();
+        if (points.length < 1) return;
 
-        // Draw points
-        ctx.fillStyle = '#6366f1';
-        for (let i = 0; i < this.pitchHistory.length; i++) {
-            const note = this.pitchHistory[i];
-            const time = this.timeHistory[i];
+        // Draw smooth curve using quadratic curves
+        ctx.strokeStyle = '#818cf8';
+        ctx.lineWidth = 3;
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
 
-            if (!note || time < now - timeRange) continue;
+        // Add glow effect
+        ctx.shadowBlur = 8;
+        ctx.shadowColor = '#6366f1';
 
-            const timeOffset = (now - time) / timeRange;
-            const x = width - (timeOffset * width);
-            const midiNote = this.noteToMidi(note);
-            const minMidi = 36;
-            const maxMidi = 84;
-            const y = height - ((midiNote - minMidi) / (maxMidi - minMidi)) * height;
+        ctx.beginPath();
 
-            ctx.beginPath();
-            ctx.arc(x, y, 3, 0, Math.PI * 2);
+        if (points.length === 1) {
+            // Single point
+            ctx.arc(points[0].x, points[0].y, 4, 0, Math.PI * 2);
+            ctx.fillStyle = '#818cf8';
             ctx.fill();
+        } else {
+            // Start from first point
+            ctx.moveTo(points[0].x, points[0].y);
+
+            // Draw smooth curve through points
+            for (let i = 1; i < points.length; i++) {
+                const prev = points[i - 1];
+                const curr = points[i];
+
+                // Use quadratic curve for smoothness
+                const cpx = (prev.x + curr.x) / 2;
+                const cpy = (prev.y + curr.y) / 2;
+
+                if (i === 1) {
+                    ctx.lineTo(cpx, cpy);
+                } else {
+                    ctx.quadraticCurveTo(prev.x, prev.y, cpx, cpy);
+                }
+            }
+
+            // Connect to last point
+            const last = points[points.length - 1];
+            if (points.length > 1) {
+                ctx.quadraticCurveTo(
+                    points[points.length - 2].x,
+                    points[points.length - 2].y,
+                    last.x,
+                    last.y
+                );
+            }
+
+            ctx.stroke();
+        }
+
+        // Reset shadow
+        ctx.shadowBlur = 0;
+
+        // Draw points on top
+        ctx.fillStyle = '#6366f1';
+        for (const point of points) {
+            ctx.beginPath();
+            ctx.arc(point.x, point.y, 4, 0, Math.PI * 2);
+            ctx.fill();
+        }
+
+        // Draw latest point larger
+        if (points.length > 0) {
+            const latest = points[points.length - 1];
+            ctx.fillStyle = '#ec4899';
+            ctx.beginPath();
+            ctx.arc(latest.x, latest.y, 6, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Outer glow for current point
+            ctx.strokeStyle = '#ec4899';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.arc(latest.x, latest.y, 9, 0, Math.PI * 2);
+            ctx.stroke();
         }
     }
 
