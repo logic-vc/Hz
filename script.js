@@ -19,20 +19,18 @@ class PitchAnalyzer {
         // Smoothing and filtering
         this.smoothingBuffer = []; // For moving average
         this.smoothingWindowSize = 5; // Average last 5 readings
-        this.volumeSmoothing = []; // For volume smoothing
-        this.volumeSmoothingSize = 3;
         this.lastSampleTime = 0;
         this.sampleInterval = 100; // Sample every 100ms (10 times per second)
         this.minVolume = 0.02; // Minimum volume threshold
         this.minConfidence = 0.92; // Minimum correlation confidence
+        this.lastValidFrequency = null; // For octave jump detection
+        this.octaveJumpThreshold = 0.3; // 30% deviation threshold
 
         // UI elements
         this.startBtn = document.getElementById('startBtn');
         this.stopBtn = document.getElementById('stopBtn');
         this.currentPitch = document.getElementById('currentPitch');
         this.currentFreq = document.getElementById('currentFreq');
-        this.currentVolume = document.getElementById('currentVolume');
-        this.volumeBar = document.getElementById('volumeBar');
 
         // Bind events
         this.startBtn.addEventListener('click', () => this.start());
@@ -110,8 +108,6 @@ class PitchAnalyzer {
         // Reset displays
         this.currentPitch.textContent = '--';
         this.currentFreq.textContent = '-- Hz';
-        this.currentVolume.textContent = '--';
-        this.volumeBar.style.width = '0%';
     }
 
     analyze() {
@@ -136,8 +132,11 @@ class PitchAnalyzer {
             const result = this.autoCorrelate(buffer, this.audioContext.sampleRate);
 
             if (result.frequency > 0 && result.confidence >= this.minConfidence) {
+                // Correct octave jumps
+                let correctedFreq = this.correctOctaveJump(result.frequency);
+
                 // Add to smoothing buffer
-                this.smoothingBuffer.push(result.frequency);
+                this.smoothingBuffer.push(correctedFreq);
                 if (this.smoothingBuffer.length > this.smoothingWindowSize) {
                     this.smoothingBuffer.shift();
                 }
@@ -148,6 +147,9 @@ class PitchAnalyzer {
 
                 if (note) {
                     this.updatePitchDisplay(note, smoothedFreq);
+
+                    // Update last valid frequency
+                    this.lastValidFrequency = smoothedFreq;
 
                     // Store data for graph
                     this.pitchHistory.push(note);
@@ -183,19 +185,8 @@ class PitchAnalyzer {
     }
 
     updateVolumeDisplay(volume) {
-        // Add to smoothing buffer
-        this.volumeSmoothing.push(volume);
-        if (this.volumeSmoothing.length > this.volumeSmoothingSize) {
-            this.volumeSmoothing.shift();
-        }
-
-        // Calculate smoothed volume
-        const smoothedVolume = this.volumeSmoothing.reduce((a, b) => a + b, 0) / this.volumeSmoothing.length;
-
-        // Convert to percentage (0-100)
-        const volumePercent = Math.min(100, smoothedVolume * 500);
-        this.volumeBar.style.width = volumePercent + '%';
-        this.currentVolume.textContent = Math.round(volumePercent) + '%';
+        // Volume display removed - method kept for compatibility
+        // Volume is still used for minVolume threshold checking
     }
 
     // Autocorrelation algorithm for pitch detection
@@ -256,6 +247,54 @@ class PitchAnalyzer {
 
         const sum = this.smoothingBuffer.reduce((a, b) => a + b, 0);
         return sum / this.smoothingBuffer.length;
+    }
+
+    // Correct octave jumps (when frequency suddenly halves or doubles)
+    correctOctaveJump(frequency) {
+        if (!this.lastValidFrequency) {
+            return frequency; // First reading, no correction needed
+        }
+
+        let corrected = frequency;
+        const ratio = frequency / this.lastValidFrequency;
+
+        // Check if frequency jumped up by an octave (~2x)
+        if (ratio > 1.8 && ratio < 2.2) {
+            // Check if halving it brings it closer to last frequency
+            const halfed = frequency / 2;
+            const halfedRatio = Math.abs(halfed / this.lastValidFrequency - 1);
+            const currentRatio = Math.abs(ratio - 1);
+
+            if (halfedRatio < currentRatio && halfedRatio < this.octaveJumpThreshold) {
+                corrected = halfed;
+            }
+        }
+        // Check if frequency jumped down by an octave (~0.5x)
+        else if (ratio > 0.45 && ratio < 0.55) {
+            // Check if doubling it brings it closer to last frequency
+            const doubled = frequency * 2;
+            const doubledRatio = Math.abs(doubled / this.lastValidFrequency - 1);
+            const currentRatio = Math.abs(ratio - 1);
+
+            if (doubledRatio < currentRatio && doubledRatio < this.octaveJumpThreshold) {
+                corrected = doubled;
+            }
+        }
+        // Check for 2-octave jumps (4x or 0.25x)
+        else if (ratio > 3.8 && ratio < 4.2) {
+            const quartered = frequency / 4;
+            if (Math.abs(quartered / this.lastValidFrequency - 1) < this.octaveJumpThreshold) {
+                corrected = quartered;
+            }
+        }
+        else if (ratio > 0.23 && ratio < 0.27) {
+            const quadrupled = frequency * 4;
+            if (Math.abs(quadrupled / this.lastValidFrequency - 1) < this.octaveJumpThreshold) {
+                corrected = quadrupled;
+            }
+        }
+
+        return corrected;
     }
 
     frequencyToNote(frequency) {
