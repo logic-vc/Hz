@@ -21,10 +21,17 @@ class PitchAnalyzer {
         this.smoothingWindowSize = 8; // Average last 8 readings (increased for smoother output)
         this.lastSampleTime = 0;
         this.sampleInterval = 100; // Sample every 100ms (10 times per second)
-        this.minVolume = 0.02; // Minimum volume threshold
-        this.minConfidence = 0.92; // Minimum correlation confidence
+        this.minVolume = 0.03; // Minimum volume threshold (increased to filter noise)
+        this.minConfidence = 0.94; // Minimum correlation confidence (increased for better accuracy)
         this.lastValidFrequency = null; // For octave jump detection
         this.octaveJumpThreshold = 0.3; // 30% deviation threshold
+
+        // Voice detection filters
+        this.minVoiceFreq = 80; // Minimum human voice frequency (Hz)
+        this.maxVoiceFreq = 1000; // Maximum human voice frequency (Hz)
+        this.stabilityBuffer = []; // Track frequency stability
+        this.stabilityWindowSize = 4; // Require 4 consecutive stable readings
+        this.stabilityThreshold = 0.05; // 5% deviation allowed for stability
 
         // UI elements
         this.startBtn = document.getElementById('startBtn');
@@ -108,6 +115,11 @@ class PitchAnalyzer {
         // Reset displays
         this.currentPitch.textContent = '--';
         this.currentFreq.textContent = '-- Hz';
+
+        // Reset all buffers
+        this.smoothingBuffer = [];
+        this.stabilityBuffer = [];
+        this.lastValidFrequency = null;
     }
 
     analyze() {
@@ -132,8 +144,21 @@ class PitchAnalyzer {
             const result = this.autoCorrelate(buffer, this.audioContext.sampleRate);
 
             if (result.frequency > 0 && result.confidence >= this.minConfidence) {
+                // Check if frequency is in human voice range
+                if (result.frequency < this.minVoiceFreq || result.frequency > this.maxVoiceFreq) {
+                    // Outside voice range - ignore
+                    this.stabilityBuffer = [];
+                    return;
+                }
+
                 // Correct octave jumps
                 let correctedFreq = this.correctOctaveJump(result.frequency);
+
+                // Check frequency stability
+                if (!this.isFrequencyStable(correctedFreq)) {
+                    // Not stable enough - don't display yet
+                    return;
+                }
 
                 // Add to smoothing buffer
                 this.smoothingBuffer.push(correctedFreq);
@@ -161,12 +186,16 @@ class PitchAnalyzer {
                         this.timeHistory.shift();
                     }
                 }
+            } else {
+                // Low confidence or no frequency - reset stability
+                this.stabilityBuffer = [];
             }
         } else if (volume < this.minVolume) {
             // Clear display when volume too low
             this.currentPitch.textContent = '--';
             this.currentFreq.textContent = '-- Hz';
             this.smoothingBuffer = []; // Reset smoothing
+            this.stabilityBuffer = []; // Reset stability
         }
 
         // Draw canvas
@@ -259,6 +288,34 @@ class PitchAnalyzer {
         return weightedSum / weightSum;
     }
 
+    // Check if frequency is stable (consistent over multiple samples)
+    // This filters out brief noises and only accepts sustained sounds like voice
+    isFrequencyStable(frequency) {
+        // Add current frequency to stability buffer
+        this.stabilityBuffer.push(frequency);
+        if (this.stabilityBuffer.length > this.stabilityWindowSize) {
+            this.stabilityBuffer.shift();
+        }
+
+        // Need enough samples to check stability
+        if (this.stabilityBuffer.length < this.stabilityWindowSize) {
+            return false; // Not enough data yet
+        }
+
+        // Calculate average frequency in buffer
+        const avgFreq = this.stabilityBuffer.reduce((a, b) => a + b, 0) / this.stabilityBuffer.length;
+
+        // Check if all samples are within threshold of average
+        for (let freq of this.stabilityBuffer) {
+            const deviation = Math.abs(freq - avgFreq) / avgFreq;
+            if (deviation > this.stabilityThreshold) {
+                return false; // Too much variation
+            }
+        }
+
+        return true; // Stable!
+    }
+
     // Correct octave jumps (when frequency suddenly halves or doubles)
     correctOctaveJump(frequency) {
         if (!this.lastValidFrequency) {
@@ -312,7 +369,8 @@ class PitchAnalyzer {
         const A4 = 440;
         const C0 = A4 * Math.pow(2, -4.75);
 
-        if (frequency < 20 || frequency > 4000) return null;
+        // Strict voice range check
+        if (frequency < this.minVoiceFreq || frequency > this.maxVoiceFreq) return null;
 
         const halfSteps = 12 * Math.log2(frequency / C0);
         const octave = Math.floor(halfSteps / 12);
