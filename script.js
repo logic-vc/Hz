@@ -18,7 +18,7 @@ class PitchAnalyzer {
 
         // Smoothing and filtering
         this.smoothingBuffer = []; // For moving average
-        this.smoothingWindowSize = 5; // Average last 5 readings
+        this.smoothingWindowSize = 8; // Average last 8 readings (increased for smoother output)
         this.lastSampleTime = 0;
         this.sampleInterval = 100; // Sample every 100ms (10 times per second)
         this.minVolume = 0.02; // Minimum volume threshold
@@ -241,12 +241,22 @@ class PitchAnalyzer {
         return { frequency: -1, confidence: 0 };
     }
 
-    // Calculate smoothed frequency using moving average
+    // Calculate smoothed frequency using weighted moving average
+    // Recent values have more weight for better responsiveness while staying smooth
     getSmoothedFrequency() {
         if (this.smoothingBuffer.length === 0) return 0;
 
-        const sum = this.smoothingBuffer.reduce((a, b) => a + b, 0);
-        return sum / this.smoothingBuffer.length;
+        let weightedSum = 0;
+        let weightSum = 0;
+
+        // Apply exponential weights (more recent = higher weight)
+        for (let i = 0; i < this.smoothingBuffer.length; i++) {
+            const weight = i + 1; // Linear weighting: 1, 2, 3, 4, 5, 6, 7, 8
+            weightedSum += this.smoothingBuffer[i] * weight;
+            weightSum += weight;
+        }
+
+        return weightedSum / weightSum;
     }
 
     // Correct octave jumps (when frequency suddenly halves or doubles)
@@ -370,7 +380,7 @@ class PitchAnalyzer {
 
         if (points.length < 1) return;
 
-        // Draw smooth curve using quadratic curves
+        // Draw smooth curve using Catmull-Rom spline
         ctx.strokeStyle = '#818cf8';
         ctx.lineWidth = 3;
         ctx.lineCap = 'round';
@@ -380,44 +390,47 @@ class PitchAnalyzer {
         ctx.shadowBlur = 8;
         ctx.shadowColor = '#6366f1';
 
-        ctx.beginPath();
-
         if (points.length === 1) {
             // Single point
+            ctx.beginPath();
             ctx.arc(points[0].x, points[0].y, 4, 0, Math.PI * 2);
             ctx.fillStyle = '#818cf8';
             ctx.fill();
+        } else if (points.length === 2) {
+            // Two points - simple line
+            ctx.beginPath();
+            ctx.moveTo(points[0].x, points[0].y);
+            ctx.lineTo(points[1].x, points[1].y);
+            ctx.stroke();
         } else {
-            // Start from first point
+            // Multiple points - use Catmull-Rom spline for smooth curve
+            ctx.beginPath();
             ctx.moveTo(points[0].x, points[0].y);
 
-            // Draw smooth curve through points
-            for (let i = 1; i < points.length; i++) {
-                const prev = points[i - 1];
-                const curr = points[i];
+            // Draw Catmull-Rom spline
+            for (let i = 0; i < points.length - 1; i++) {
+                const p0 = points[Math.max(0, i - 1)];
+                const p1 = points[i];
+                const p2 = points[i + 1];
+                const p3 = points[Math.min(points.length - 1, i + 2)];
 
-                // Use quadratic curve for smoothness
-                const cpx = (prev.x + curr.x) / 2;
-                const cpy = (prev.y + curr.y) / 2;
+                // Number of segments per curve (higher = smoother)
+                const segments = 20;
 
-                if (i === 1) {
-                    ctx.lineTo(cpx, cpy);
-                } else {
-                    ctx.quadraticCurveTo(prev.x, prev.y, cpx, cpy);
+                for (let t = 0; t < segments; t++) {
+                    const tt = t / segments;
+                    const point = this.catmullRomPoint(p0, p1, p2, p3, tt);
+
+                    if (i === 0 && t === 0) {
+                        ctx.moveTo(point.x, point.y);
+                    } else {
+                        ctx.lineTo(point.x, point.y);
+                    }
                 }
             }
 
-            // Connect to last point
-            const last = points[points.length - 1];
-            if (points.length > 1) {
-                ctx.quadraticCurveTo(
-                    points[points.length - 2].x,
-                    points[points.length - 2].y,
-                    last.x,
-                    last.y
-                );
-            }
-
+            // Draw to last point
+            ctx.lineTo(points[points.length - 1].x, points[points.length - 1].y);
             ctx.stroke();
         }
 
@@ -447,6 +460,28 @@ class PitchAnalyzer {
             ctx.arc(latest.x, latest.y, 9, 0, Math.PI * 2);
             ctx.stroke();
         }
+    }
+
+    // Catmull-Rom spline interpolation for smooth curves
+    catmullRomPoint(p0, p1, p2, p3, t) {
+        const t2 = t * t;
+        const t3 = t2 * t;
+
+        const x = 0.5 * (
+            (2 * p1.x) +
+            (-p0.x + p2.x) * t +
+            (2 * p0.x - 5 * p1.x + 4 * p2.x - p3.x) * t2 +
+            (-p0.x + 3 * p1.x - 3 * p2.x + p3.x) * t3
+        );
+
+        const y = 0.5 * (
+            (2 * p1.y) +
+            (-p0.y + p2.y) * t +
+            (2 * p0.y - 5 * p1.y + 4 * p2.y - p3.y) * t2 +
+            (-p0.y + 3 * p1.y - 3 * p2.y + p3.y) * t3
+        );
+
+        return { x, y };
     }
 
     drawGrid(ctx, width, height) {
